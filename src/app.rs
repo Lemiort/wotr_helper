@@ -4,6 +4,16 @@ use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use rfd::FileDialog;
 
+// A named rectangular region on a card (x,y,width,height in card pixel coords)
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct Region {
+    pub name: String,
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
@@ -41,6 +51,42 @@ pub struct TemplateApp {
 
     #[serde(skip)]
     error: Option<String>,
+
+    // Regions editor state:
+    regions: Vec<Region>, // saved regions (coordinates in card pixels)
+
+    #[serde(skip)]
+    drag_start: Option<egui::Pos2>,
+
+    #[serde(skip)]
+    drag_current: Option<egui::Pos2>,
+
+    #[serde(skip)]
+    pending_region: Option<[usize; 4]>, // x,y,w,h in card pixels while naming
+
+    #[serde(skip)]
+    new_region_name: String,
+
+    #[serde(skip)]
+    selected_region: Option<usize>,
+
+    #[serde(skip)]
+    dragging: bool,
+
+    #[serde(skip)]
+    last_pointer_down: bool,
+
+    #[serde(skip)]
+    recent_events: std::collections::VecDeque<String>,
+
+    #[serde(skip)]
+    recent_events_paused: bool,
+
+    #[serde(skip)]
+    event_dump: Option<String>,
+
+    #[serde(skip)]
+    pointer_down_on_image: bool,
 }
 
 const ATLAS_PATH: &str = "assets/light_cards.png"; // Default atlas path; use Open... to pick a different file
@@ -70,6 +116,19 @@ impl Default for TemplateApp {
             texture: None,
             last_index: None,
             error: None,
+            // regions editor defaults
+            regions: Vec::new(),
+            drag_start: None,
+            drag_current: None,
+            pending_region: None,
+            new_region_name: String::new(),
+            selected_region: None,
+            dragging: false,
+            last_pointer_down: false,
+            recent_events: std::collections::VecDeque::with_capacity(256),
+            recent_events_paused: false,
+            event_dump: None,
+            pointer_down_on_image: false,
         }
     }
 }
@@ -200,9 +259,97 @@ impl eframe::App for TemplateApp {
             });
         });
 
+        egui::SidePanel::right("regions_panel").resizable(true).default_width(260.0).show(ctx, |ui| {
+            ui.heading("Regions");
+            ui.separator();
+
+            let mut to_delete: Option<usize> = None;
+
+            if let Some([px, py, pw, ph]) = self.pending_region {
+                ui.label("New region pending:");
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}×{} @ {},{}", pw, ph, px, py));
+                    if ui.button("Add").clicked() {
+                        self.regions.push(Region { name: self.new_region_name.clone(), x: px, y: py, width: pw, height: ph });
+                        self.selected_region = Some(self.regions.len()-1);
+                        self.pending_region = None;
+                        self.new_region_name.clear();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.pending_region = None;
+                        self.new_region_name.clear();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    ui.add(egui::TextEdit::singleline(&mut self.new_region_name));
+                });
+                ui.separator();
+            } else {
+                ui.label("No pending region.");
+                ui.separator();
+            }
+
+            ui.label("Saved regions:");
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for (i, r) in self.regions.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        let selected = self.selected_region == Some(i);
+                        if ui.selectable_label(selected, &r.name).clicked() {
+                            self.selected_region = Some(i);
+                        }
+                        ui.label(format!("{}x{} @ {},{}", r.width, r.height, r.x, r.y));
+                        if ui.small_button("Delete").clicked() {
+                            to_delete = Some(i);
+                        }
+                    });
+                }
+            });
+
+            if let Some(i) = to_delete {
+                if i < self.regions.len() {
+                    self.regions.remove(i);
+                    if self.selected_region == Some(i) { self.selected_region = None; }
+                }
+            }
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Clear All").clicked() {
+                    self.regions.clear();
+                    self.selected_region = None;
+                }
+                if ui.button("Save...").clicked() {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).save_file() {
+                        if let Ok(s) = serde_json::to_string_pretty(&self.regions) {
+                            let _ = std::fs::write(path, s);
+                        }
+                    }
+                }
+                if ui.button("Load...").clicked() {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+                        match std::fs::read_to_string(&path) {
+                            Ok(s) => match serde_json::from_str::<Vec<Region>>(&s) {
+                                Ok(v) => { self.regions = v; self.selected_region = None; },
+                                Err(e) => { self.error = Some(format!("Failed to parse regions: {}", e)); },
+                            },
+                            Err(e) => { self.error = Some(format!("Failed to read regions file: {}", e)); },
+                        }
+                    }
+                }
+            });
+
+
+        });
+
+
+
         egui::CentralPanel::default().show(ctx, |ui| {
             // The central panel — Atlas Viewer
             ui.heading("Atlas Viewer");
+            egui::warn_if_debug_build(ui);
             ui.separator();
 
             // --- Atlas viewer UI ---
@@ -318,38 +465,355 @@ impl eframe::App for TemplateApp {
                         let mut scale = scale_x.min(scale_y);
                         scale = scale.clamp(0.1, 4.0);
                         let desired_size = egui::vec2(cw * scale, ch * scale);
-                        ui.add(egui::Image::new((tex.id(), desired_size)));
+
+                        // Show image and capture response for mouse interactions
+                        let img_widget = egui::Image::new((tex.id(), desired_size));
+                        let resp = ui.add(img_widget.sense(egui::Sense::click_and_drag()));
+                        let img_rect = resp.rect;
+
+                        // Response state debug: shows whether `resp` reports hover/click/drag events
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(format!("hovered: {}", resp.hovered()));
+                            ui.separator();
+                            ui.label(format!("contains_pointer: {}", resp.contains_pointer()));
+                            ui.separator();
+                            ui.label(format!("pointer_down_on: {}", resp.is_pointer_button_down_on()));
+                            ui.separator();
+                            ui.label(format!("interact_pos: {:?}", resp.interact_pointer_pos()));
+                            ui.separator();
+                            ui.label(format!("drag_started: {}", resp.drag_started_by(egui::PointerButton::Primary)));
+                            ui.separator();
+                            ui.label(format!("dragged: {}", resp.dragged_by(egui::PointerButton::Primary)));
+                            ui.separator();
+                            ui.label(format!("drag_stopped: {}", resp.drag_stopped_by(egui::PointerButton::Primary)));
+                            ui.separator();
+                            ui.label(format!("clicked: {}", resp.clicked_by(egui::PointerButton::Primary)));
+                        });
+
+                        // Additional fallback: process raw pointer events to detect presses/drags/releases when Response misses them
+                        {
+                            const DRAG_THRESHOLD: f32 = 4.0;
+                            let events = ctx.input(|i| i.events.clone());
+                            for ev in events.iter() {
+                                match ev {
+                                    egui::Event::PointerButton { pos, button, pressed, .. } => {
+                                        if *button == egui::PointerButton::Primary {
+                                            if *pressed {
+                                                if img_rect.contains(*pos) {
+                                                    self.pointer_down_on_image = true;
+                                                    self.drag_start = Some(*pos);
+                                                    self.drag_current = Some(*pos);
+                                                    self.dragging = false;
+                                                } else {
+                                                    self.pointer_down_on_image = false;
+                                                }
+                                            } else {
+                                                // release
+                                                if self.pointer_down_on_image || self.dragging {
+                                                    let end = *pos;
+                                                    if self.dragging {
+                                                        if let Some(start) = self.drag_start {
+                                                            let local_start = start - img_rect.min;
+                                                            let local_end = end - img_rect.min;
+                                                            let sx = local_start.x.clamp(0.0, img_rect.width());
+                                                            let sy = local_start.y.clamp(0.0, img_rect.height());
+                                                            let ex = local_end.x.clamp(0.0, img_rect.width());
+                                                            let ey = local_end.y.clamp(0.0, img_rect.height());
+                                                            let lx = sx.min(ex);
+                                                            let ly = sy.min(ey);
+                                                            let lw = (sx - ex).abs();
+                                                            let lh = (sy - ey).abs();
+                                                            let scale_ui_to_px = 1.0 / scale;
+                                                            let px = (lx * scale_ui_to_px).round().max(0.0) as usize;
+                                                            let py = (ly * scale_ui_to_px).round().max(0.0) as usize;
+                                                            let pw = (lw * scale_ui_to_px).round().max(1.0) as usize;
+                                                            let ph = (lh * scale_ui_to_px).round().max(1.0) as usize;
+                                                            self.pending_region = Some([px, py, pw, ph]);
+                                                            self.new_region_name = format!("region{}", self.regions.len() + 1);
+                                                        }
+                                                    } else {
+                                                        // click
+                                                        if img_rect.contains(end) {
+                                                            let local = end - img_rect.min;
+                                                            let scale_ui_to_px = 1.0 / scale;
+                                                            let px = (local.x * scale_ui_to_px).floor().max(0.0) as usize;
+                                                            let py = (local.y * scale_ui_to_px).floor().max(0.0) as usize;
+                                                            let mut found: Option<usize> = None;
+                                                            for (i, r) in self.regions.iter().enumerate() {
+                                                                if px >= r.x && px < r.x + r.width && py >= r.y && py < r.y + r.height {
+                                                                    found = Some(i);
+                                                                    break;
+                                                                }
+                                                            }
+                                                            self.selected_region = found;
+                                                        } else {
+                                                            self.selected_region = None;
+                                                        }
+                                                    }
+                                                }
+                                                self.pointer_down_on_image = false;
+                                                self.drag_start = None;
+                                                self.drag_current = None;
+                                                self.dragging = false;
+                                            }
+                                        }
+                                    }
+                                    egui::Event::PointerMoved(pos) => {
+                                        if self.pointer_down_on_image {
+                                            if let Some(start) = self.drag_start {
+                                                let dist = ((*pos) - start).length();
+                                                if !self.dragging && dist > DRAG_THRESHOLD {
+                                                    self.dragging = true;
+                                                }
+                                                if self.dragging {
+                                                    self.drag_current = Some(*pos);
+                                                    // update live pending region
+                                                    let local_start = start - img_rect.min;
+                                                    let local_pos = (*pos) - img_rect.min;
+                                                    let sx = local_start.x.clamp(0.0, img_rect.width());
+                                                    let sy = local_start.y.clamp(0.0, img_rect.height());
+                                                    let ex = local_pos.x.clamp(0.0, img_rect.width());
+                                                    let ey = local_pos.y.clamp(0.0, img_rect.height());
+                                                    let lx = sx.min(ex);
+                                                    let ly = sy.min(ey);
+                                                    let lw = (sx - ex).abs();
+                                                    let lh = (sy - ey).abs();
+                                                    let scale_ui_to_px = 1.0 / scale;
+                                                    let px = (lx * scale_ui_to_px).round().max(0.0) as usize;
+                                                    let py = (ly * scale_ui_to_px).round().max(0.0) as usize;
+                                                    let pw = (lw * scale_ui_to_px).round().max(1.0) as usize;
+                                                    let ph = (lh * scale_ui_to_px).round().max(1.0) as usize;
+                                                    self.pending_region = Some([px, py, pw, ph]);
+                                                    if self.new_region_name.is_empty() {
+                                                        self.new_region_name = format!("region{}", self.regions.len() + 1);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+
+                        /* old input handling disabled: */ if false {
+                        // Enhanced drag handling with a small movement threshold:
+                        // - Quick click (press+release without moving) is treated as selection
+                        // - Click+drag (movement > threshold) creates a pending region on release
+                        const DRAG_THRESHOLD: f32 = 4.0;
+
+
+                        // Prefer explicit PointerButton events to detect presses/releases reliably
+                        let events = ctx.input(|i| i.events.clone());
+                        let mut pressed_event = false;
+                        let mut released_event = false;
+                        for ev in events.iter() {
+                            match ev {
+                                egui::Event::PointerButton { button, pressed, .. } => {
+                                    if *button == egui::PointerButton::Primary {
+                                        if *pressed { pressed_event = true; } else { released_event = true; }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // Use hover_pos and interact_pos as before, but combine event-derived flags
+                        let hover_pos = ctx.input(|i| i.pointer.hover_pos());
+                        let pos_opt = ctx.input(|i| i.pointer.interact_pos()).or(hover_pos);
+                        let pressed = pressed_event || ctx.input(|i| i.pointer.any_pressed());
+                        let down = ctx.input(|i| i.pointer.any_down());
+                        let released = released_event || ctx.input(|i| i.pointer.any_released());
+
+                        // Start potential drag when pointer pressed while hovering the image
+                        // legacy press handling removed (using Response::drag_started_by)
+                        // if needed, use resp.drag_started_by/resp.clicked_by/resp.interact_pointer_pos() instead.
+
+                        // Update while pointer is down
+                        if down {
+                            if let (Some(start), Some(pos)) = (self.drag_start, pos_opt.or(hover_pos)) {
+                                self.drag_current = Some(pos);
+                                let dist = (pos - start).length();
+                                if dist > DRAG_THRESHOLD {
+                                    self.dragging = true;
+                                }
+
+                                // While dragging, update a live pending region so user can Add even if release isn't observed
+                                if self.dragging {
+                                    // Convert screen coords to local image coords
+                                    let local_start = start - img_rect.min;
+                                    let local_pos = pos - img_rect.min;
+
+                                    // Clamp to image rect
+                                    let sx = local_start.x.clamp(0.0, img_rect.width());
+                                    let sy = local_start.y.clamp(0.0, img_rect.height());
+                                    let ex = local_pos.x.clamp(0.0, img_rect.width());
+                                    let ey = local_pos.y.clamp(0.0, img_rect.height());
+
+                                    let lx = sx.min(ex);
+                                    let ly = sy.min(ey);
+                                    let lw = (sx - ex).abs();
+                                    let lh = (sy - ey).abs();
+
+                                    // Convert to card pixel coords
+                                    let scale_ui_to_px = 1.0 / scale;
+                                    let px = (lx * scale_ui_to_px).round().max(0.0) as usize;
+                                    let py = (ly * scale_ui_to_px).round().max(0.0) as usize;
+                                    let pw = (lw * scale_ui_to_px).round().max(1.0) as usize;
+                                    let ph = (lh * scale_ui_to_px).round().max(1.0) as usize;
+
+                                    self.pending_region = Some([px, py, pw, ph]);
+                                    if self.new_region_name.is_empty() {
+                                        self.new_region_name = format!("region{}", self.regions.len() + 1);
+                                    }
+                                }
+                            }
+                        }
+
+                        // On release: if we were dragging, create a pending region; otherwise selection logic handles clicks
+                        if released && self.drag_start.is_some() {
+                            let start = self.drag_start.unwrap();
+                            let end = pos_opt.or(self.drag_current).or(hover_pos).unwrap_or(start);
+
+                            if self.dragging {
+                                // Convert screen coords to local image coords
+                                let local_start = start - img_rect.min;
+                                let local_end = end - img_rect.min;
+
+                                // Clamp to image rect
+                                let sx = local_start.x.clamp(0.0, img_rect.width());
+                                let sy = local_start.y.clamp(0.0, img_rect.height());
+                                let ex = local_end.x.clamp(0.0, img_rect.width());
+                                let ey = local_end.y.clamp(0.0, img_rect.height());
+
+                                let lx = sx.min(ex);
+                                let ly = sy.min(ey);
+                                let lw = (sx - ex).abs();
+                                let lh = (sy - ey).abs();
+
+                                // Convert to card pixel coords
+                                let scale_ui_to_px = 1.0 / scale; // since desired_size = card_size * scale
+                                let px = (lx * scale_ui_to_px).round().max(0.0) as usize;
+                                let py = (ly * scale_ui_to_px).round().max(0.0) as usize;
+                                let pw = (lw * scale_ui_to_px).round().max(1.0) as usize;
+                                let ph = (lh * scale_ui_to_px).round().max(1.0) as usize;
+
+                                self.pending_region = Some([px, py, pw, ph]);
+                                self.new_region_name = format!("region{}", self.regions.len() + 1);
+                            }
+
+                            self.drag_start = None;
+                            self.drag_current = None;
+                            self.dragging = false;
+                        }
+
+                        // Also handle pointer-up that occurred outside of widget (e.g. released while cursor moved off image)
+                        let current_down = down;
+                        if self.dragging && self.last_pointer_down && !current_down {
+                            // Treat similar to release while dragging
+                            if let Some(start) = self.drag_start {
+                                let end = self.drag_current.or(pos_opt).or(ctx.input(|i| i.pointer.hover_pos())).unwrap_or(start);
+
+                                // Convert screen coords to local image coords
+                                let local_start = start - img_rect.min;
+                                let local_end = end - img_rect.min;
+
+                                // Clamp to image rect
+                                let sx = local_start.x.clamp(0.0, img_rect.width());
+                                let sy = local_start.y.clamp(0.0, img_rect.height());
+                                let ex = local_end.x.clamp(0.0, img_rect.width());
+                                let ey = local_end.y.clamp(0.0, img_rect.height());
+
+                                let lx = sx.min(ex);
+                                let ly = sy.min(ey);
+                                let lw = (sx - ex).abs();
+                                let lh = (sy - ey).abs();
+
+                                // Convert to card pixel coords
+                                let scale_ui_to_px = 1.0 / scale; // since desired_size = card_size * scale
+                                let px = (lx * scale_ui_to_px).round().max(0.0) as usize;
+                                let py = (ly * scale_ui_to_px).round().max(0.0) as usize;
+                                let pw = (lw * scale_ui_to_px).round().max(1.0) as usize;
+                                let ph = (lh * scale_ui_to_px).round().max(1.0) as usize;
+
+                                self.pending_region = Some([px, py, pw, ph]);
+                                self.new_region_name = format!("region{}", self.regions.len() + 1);
+                            }
+
+                            self.drag_start = None;
+                            self.drag_current = None;
+                            self.dragging = false;
+                        }
+
+                        // Update last pointer down state for next frame
+                        self.last_pointer_down = current_down;
+
+                        // Click (release while hovering) selects a region if released inside it; clicking outside clears selection.
+                        // Do not run selection if a pending region was just created this frame.
+                        // legacy click handling removed; use resp.clicked_by to detect clicks instead
+
+                        }
+
+                        // Paint overlays (existing regions and drag preview)
+                        let painter = ui.painter();
+                        // Draw existing regions
+                        for (i, r) in self.regions.iter().enumerate() {
+                            let x = img_rect.min.x + (r.x as f32) * scale;
+                            let y = img_rect.min.y + (r.y as f32) * scale;
+                            let w = (r.width as f32) * scale;
+                            let h = (r.height as f32) * scale;
+                            let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+                            let color = if self.selected_region == Some(i) { egui::Color32::LIGHT_BLUE } else { egui::Color32::from_rgba_unmultiplied(200, 100, 100, 180) };
+                            let stroke = egui::Stroke::new(2.0, color);
+                            painter.line_segment([rect.left_top(), rect.right_top()], stroke);
+                            painter.line_segment([rect.right_top(), rect.right_bottom()], stroke);
+                            painter.line_segment([rect.right_bottom(), rect.left_bottom()], stroke);
+                            painter.line_segment([rect.left_bottom(), rect.left_top()], stroke);
+                            if self.selected_region == Some(i) {
+                                painter.rect_filled(rect.expand(2.0), 2.0, egui::Color32::from_rgba_unmultiplied(40, 100, 160, 48));
+                            }
+                        }
+
+                        // Draw drag preview if dragging
+                        if let (Some(start), Some(cur)) = (self.drag_start, self.drag_current) {
+                            let local_start = start - img_rect.min;
+                            let local_cur = cur - img_rect.min;
+                            let lx = local_start.x.min(local_cur.x).clamp(0.0, img_rect.width());
+                            let ly = local_start.y.min(local_cur.y).clamp(0.0, img_rect.height());
+                            let lw = (local_start.x - local_cur.x).abs().clamp(1.0, img_rect.width());
+                            let lh = (local_start.y - local_cur.y).abs().clamp(1.0, img_rect.height());
+                            let rect = egui::Rect::from_min_size(img_rect.min + egui::vec2(lx, ly), egui::vec2(lw, lh));
+                            let stroke = egui::Stroke::new(2.0, egui::Color32::YELLOW);
+                            painter.line_segment([rect.left_top(), rect.right_top()], stroke);
+                            painter.line_segment([rect.right_top(), rect.right_bottom()], stroke);
+                            painter.line_segment([rect.right_bottom(), rect.left_bottom()], stroke);
+                            painter.line_segment([rect.left_bottom(), rect.left_top()], stroke);
+                        }
+
+                        // Draw pending region (after release, before naming)
+                        if let Some([px, py, pw, ph]) = self.pending_region {
+                            let x = img_rect.min.x + (px as f32) * scale;
+                            let y = img_rect.min.y + (py as f32) * scale;
+                            let w = (pw as f32) * scale;
+                            let h = (ph as f32) * scale;
+                            let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+                            let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgba_unmultiplied(255, 200, 0, 200));
+                            painter.line_segment([rect.left_top(), rect.right_top()], stroke);
+                            painter.line_segment([rect.right_top(), rect.right_bottom()], stroke);
+                            painter.line_segment([rect.right_bottom(), rect.left_bottom()], stroke);
+                            painter.line_segment([rect.left_bottom(), rect.left_top()], stroke);
+                            painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(255, 200, 0, 40));
+                        }
+
+                        // Debug moved to SidePanel (right) for visibility
                     });
+
+
                 } else {
                     ui.label("No preview available for this index (out of range or atlas missing).");
                 }
             }
-
-            ui.separator();
-
-            ui.add(egui::github_link_file!(
-                "https://github.com/emilk/eframe_template/blob/main/",
-                "Source code."
-            ));
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                powered_by_egui_and_eframe(ui);
-                egui::warn_if_debug_build(ui);
-            });
         });
     }
 }
 
-fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label("Powered by ");
-        ui.hyperlink_to("egui", "https://github.com/emilk/egui");
-        ui.label(" and ");
-        ui.hyperlink_to(
-            "eframe",
-            "https://github.com/emilk/egui/tree/master/crates/eframe",
-        );
-        ui.label(".");
-    });
-}
