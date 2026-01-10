@@ -623,13 +623,12 @@ impl eframe::App for TemplateApp {
 
                         // Prefer explicit PointerButton events to detect presses/releases reliably
                         let events = ctx.input(|i| i.events.clone());
-                        let mut pressed_event = false;
                         let mut released_event = false;
                         for ev in events.iter() {
                             match ev {
                                 egui::Event::PointerButton { button, pressed, .. } => {
                                     if *button == egui::PointerButton::Primary {
-                                        if *pressed { pressed_event = true; } else { released_event = true; }
+                                        if !*pressed { released_event = true; }
                                     }
                                 }
                                 _ => {}
@@ -639,7 +638,6 @@ impl eframe::App for TemplateApp {
                         // Use hover_pos and interact_pos as before, but combine event-derived flags
                         let hover_pos = ctx.input(|i| i.pointer.hover_pos());
                         let pos_opt = ctx.input(|i| i.pointer.interact_pos()).or(hover_pos);
-                        let pressed = pressed_event || ctx.input(|i| i.pointer.any_pressed());
                         let down = ctx.input(|i| i.pointer.any_down());
                         let released = released_event || ctx.input(|i| i.pointer.any_released());
 
