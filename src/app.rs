@@ -30,6 +30,9 @@ pub struct TemplateApp {
     card_width: usize,
     card_height: usize,
 
+    // Selected preset index into CARD_FORMATS or None for custom
+    selected_preset: Option<usize>,
+
     #[serde(skip)]
     texture: Option<egui::TextureHandle>,
 
@@ -41,6 +44,13 @@ pub struct TemplateApp {
 }
 
 const ATLAS_PATH: &str = "assets/light_cards.png"; // Default atlas path; use Open... to pick a different file
+
+// Hardcoded card format presets: (label, width, height)
+const CARD_FORMATS: &[(&str, usize, usize)] = &[
+    ("Player cards (535×752)", 535, 752),
+    ("Fortress (1380x912)", 1380, 912),
+    ("Path (1380x912)", 1380, 912),
+];
 
 impl Default for TemplateApp {
     fn default() -> Self {
@@ -56,6 +66,7 @@ impl Default for TemplateApp {
             // sensible default card sizes
             card_width: 535,
             card_height: 752,
+            selected_preset: None,
             texture: None,
             last_index: None,
             error: None,
@@ -221,8 +232,32 @@ impl eframe::App for TemplateApp {
                 }
             });
 
-            // Card size controls
+            // Card size controls + presets
             ui.horizontal(|ui| {
+                ui.label("Format:");
+                let selected_text = self
+                    .selected_preset
+                    .and_then(|i| CARD_FORMATS.get(i).map(|(n,_,_)| *n))
+                    .unwrap_or("Custom");
+
+                egui::ComboBox::from_id_salt("card_format").selected_text(selected_text).show_ui(ui, |ui| {
+                    for (i, (name, w, h)) in CARD_FORMATS.iter().enumerate() {
+                        if ui.selectable_label(self.selected_preset == Some(i), *name).clicked() {
+                            self.selected_preset = Some(i);
+                            self.card_width = *w;
+                            self.card_height = *h;
+                            self.texture = None;
+                            self.last_index = None;
+                            if self.index > self.max_index() { self.index = self.max_index(); }
+                        }
+                    }
+                    if ui.selectable_label(self.selected_preset.is_none(), "Custom").clicked() {
+                        self.selected_preset = None;
+                    }
+                });
+
+                ui.separator();
+
                 ui.label("Card width:");
                 let mut w = self.card_width as i64;
                 ui.add(egui::DragValue::new(&mut w).range(1..=4096));
@@ -234,6 +269,8 @@ impl eframe::App for TemplateApp {
                 self.card_width = w.max(1) as usize;
                 self.card_height = h.max(1) as usize;
                 if changed {
+                    // If user manually changes size, treat as custom
+                    self.selected_preset = None;
                     self.texture = None;
                     self.last_index = None;
                     // clamp index
