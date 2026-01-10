@@ -87,6 +87,9 @@ pub struct TemplateApp {
 
     #[serde(skip)]
     pointer_down_on_image: bool,
+
+    /// Runtime toggle to show/hide the regions SidePanel on native builds
+    show_regions_panel: bool,
 }
 
 const ATLAS_PATH: &str = "assets/light_cards.png"; // Default atlas path; use Open... to pick a different file
@@ -129,6 +132,7 @@ impl Default for TemplateApp {
             recent_events_paused: false,
             event_dump: None,
             pointer_down_on_image: false,
+            show_regions_panel: false,
         }
     }
 }
@@ -259,90 +263,93 @@ impl eframe::App for TemplateApp {
             });
         });
 
-        egui::SidePanel::right("regions_panel").resizable(true).default_width(260.0).show(ctx, |ui| {
-            ui.heading("Regions");
-            ui.separator();
-
-            let mut to_delete: Option<usize> = None;
-
-            if let Some([px, py, pw, ph]) = self.pending_region {
-                ui.label("New region pending:");
-                ui.horizontal(|ui| {
-                    ui.label(format!("{}×{} @ {},{}", pw, ph, px, py));
-                    if ui.button("Add").clicked() {
-                        self.regions.push(Region { name: self.new_region_name.clone(), x: px, y: py, width: pw, height: ph });
-                        self.selected_region = Some(self.regions.len()-1);
-                        self.pending_region = None;
-                        self.new_region_name.clear();
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.pending_region = None;
-                        self.new_region_name.clear();
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Name:");
-                    ui.add(egui::TextEdit::singleline(&mut self.new_region_name));
-                });
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.show_regions_panel {
+                egui::SidePanel::right("regions_panel").resizable(true).default_width(260.0).show(ctx, |ui| {
+                ui.heading("Regions");
                 ui.separator();
-            } else {
-                ui.label("No pending region.");
-                ui.separator();
-            }
 
-            ui.label("Saved regions:");
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for (i, r) in self.regions.iter().enumerate() {
+                let mut to_delete: Option<usize> = None;
+
+                if let Some([px, py, pw, ph]) = self.pending_region {
+                    ui.label("New region pending:");
                     ui.horizontal(|ui| {
-                        let selected = self.selected_region == Some(i);
-                        if ui.selectable_label(selected, &r.name).clicked() {
-                            self.selected_region = Some(i);
+                        ui.label(format!("{}×{} @ {},{}", pw, ph, px, py));
+                        if ui.button("Add").clicked() {
+                            self.regions.push(Region { name: self.new_region_name.clone(), x: px, y: py, width: pw, height: ph });
+                            self.selected_region = Some(self.regions.len()-1);
+                            self.pending_region = None;
+                            self.new_region_name.clear();
                         }
-                        ui.label(format!("{}x{} @ {},{}", r.width, r.height, r.x, r.y));
-                        if ui.small_button("Delete").clicked() {
-                            to_delete = Some(i);
+                        if ui.button("Cancel").clicked() {
+                            self.pending_region = None;
+                            self.new_region_name.clear();
                         }
                     });
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.add(egui::TextEdit::singleline(&mut self.new_region_name));
+                    });
+                    ui.separator();
+                } else {
+                    ui.label("No pending region.");
+                    ui.separator();
                 }
-            });
 
-            if let Some(i) = to_delete {
-                if i < self.regions.len() {
-                    self.regions.remove(i);
-                    if self.selected_region == Some(i) { self.selected_region = None; }
+                ui.label("Saved regions:");
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for (i, r) in self.regions.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            let selected = self.selected_region == Some(i);
+                            if ui.selectable_label(selected, &r.name).clicked() {
+                                self.selected_region = Some(i);
+                            }
+                            ui.label(format!("{}x{} @ {},{}", r.width, r.height, r.x, r.y));
+                            if ui.small_button("Delete").clicked() {
+                                to_delete = Some(i);
+                            }
+                        });
+                    }
+                });
+
+                if let Some(i) = to_delete {
+                    if i < self.regions.len() {
+                        self.regions.remove(i);
+                        if self.selected_region == Some(i) { self.selected_region = None; }
+                    }
                 }
+
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Clear All").clicked() {
+                        self.regions.clear();
+                        self.selected_region = None;
+                    }
+                    if ui.button("Save...").clicked() {
+                        if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).save_file() {
+                            if let Ok(s) = serde_json::to_string_pretty(&self.regions) {
+                                let _ = std::fs::write(path, s);
+                            }
+                        }
+                    }
+                    if ui.button("Load...").clicked() {
+                        if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+                            match std::fs::read_to_string(&path) {
+                                Ok(s) => match serde_json::from_str::<Vec<Region>>(&s) {
+                                    Ok(v) => { self.regions = v; self.selected_region = None; },
+                                    Err(e) => { self.error = Some(format!("Failed to parse regions: {}", e)); },
+                                },
+                                Err(e) => { self.error = Some(format!("Failed to read regions file: {}", e)); },
+                            }
+                        }
+                    }
+                });
+            });
             }
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui.button("Clear All").clicked() {
-                    self.regions.clear();
-                    self.selected_region = None;
-                }
-                if ui.button("Save...").clicked() {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).save_file() {
-                        if let Ok(s) = serde_json::to_string_pretty(&self.regions) {
-                            let _ = std::fs::write(path, s);
-                        }
-                    }
-                }
-                if ui.button("Load...").clicked() {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
-                        match std::fs::read_to_string(&path) {
-                            Ok(s) => match serde_json::from_str::<Vec<Region>>(&s) {
-                                Ok(v) => { self.regions = v; self.selected_region = None; },
-                                Err(e) => { self.error = Some(format!("Failed to parse regions: {}", e)); },
-                            },
-                            Err(e) => { self.error = Some(format!("Failed to read regions file: {}", e)); },
-                        }
-                    }
-                }
-            });
+        }
 
 
-        });
 
 
 
@@ -444,6 +451,10 @@ impl eframe::App for TemplateApp {
                 ui.label(format!("Atlas: {}x{} | cols: {} rows: {} | max index: {}", self.atlas_size[0], self.atlas_size[1], self.cols(), self.rows(), self.max_index()));
             });
 
+            // Show/hide Regions panel (native only)
+            #[cfg(not(target_arch = "wasm32"))]
+            ui.checkbox(&mut self.show_regions_panel, "Show regions panel");
+
             if let Some(err) = &self.error {
                 ui.colored_label(egui::Color32::RED, err);
                 ui.label("Place your atlas image and use Open... to pick it.");
@@ -490,8 +501,9 @@ impl eframe::App for TemplateApp {
                             ui.label(format!("clicked: {}", resp.clicked_by(egui::PointerButton::Primary)));
                         });
 
-                        // Additional fallback: process raw pointer events to detect presses/drags/releases when Response misses them
+                        #[cfg(not(target_arch = "wasm32"))]
                         {
+                            // Additional fallback: process raw pointer events to detect presses/drags/releases when Response misses them
                             const DRAG_THRESHOLD: f32 = 4.0;
                             let events = ctx.input(|i| i.events.clone());
                             for ev in events.iter() {
@@ -528,8 +540,11 @@ impl eframe::App for TemplateApp {
                                                             let py = (ly * scale_ui_to_px).round().max(0.0) as usize;
                                                             let pw = (lw * scale_ui_to_px).round().max(1.0) as usize;
                                                             let ph = (lh * scale_ui_to_px).round().max(1.0) as usize;
-                                                            self.pending_region = Some([px, py, pw, ph]);
-                                                            self.new_region_name = format!("region{}", self.regions.len() + 1);
+                                                            #[cfg(not(target_arch = "wasm32"))]
+                                                            {
+                                                                self.pending_region = Some([px, py, pw, ph]);
+                                                                self.new_region_name = format!("region{}", self.regions.len() + 1);
+                                                            }
                                                         }
                                                     } else {
                                                         // click
@@ -583,9 +598,12 @@ impl eframe::App for TemplateApp {
                                                     let py = (ly * scale_ui_to_px).round().max(0.0) as usize;
                                                     let pw = (lw * scale_ui_to_px).round().max(1.0) as usize;
                                                     let ph = (lh * scale_ui_to_px).round().max(1.0) as usize;
-                                                    self.pending_region = Some([px, py, pw, ph]);
-                                                    if self.new_region_name.is_empty() {
-                                                        self.new_region_name = format!("region{}", self.regions.len() + 1);
+                                                    #[cfg(not(target_arch = "wasm32"))]
+                                                    {
+                                                        self.pending_region = Some([px, py, pw, ph]);
+                                                        if self.new_region_name.is_empty() {
+                                                            self.new_region_name = format!("region{}", self.regions.len() + 1);
+                                                        }
                                                     }
                                                 }
                                             }
@@ -662,9 +680,12 @@ impl eframe::App for TemplateApp {
                                     let pw = (lw * scale_ui_to_px).round().max(1.0) as usize;
                                     let ph = (lh * scale_ui_to_px).round().max(1.0) as usize;
 
-                                    self.pending_region = Some([px, py, pw, ph]);
-                                    if self.new_region_name.is_empty() {
-                                        self.new_region_name = format!("region{}", self.regions.len() + 1);
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    {
+                                        self.pending_region = Some([px, py, pw, ph]);
+                                        if self.new_region_name.is_empty() {
+                                            self.new_region_name = format!("region{}", self.regions.len() + 1);
+                                        }
                                     }
                                 }
                             }
@@ -698,8 +719,11 @@ impl eframe::App for TemplateApp {
                                 let pw = (lw * scale_ui_to_px).round().max(1.0) as usize;
                                 let ph = (lh * scale_ui_to_px).round().max(1.0) as usize;
 
-                                self.pending_region = Some([px, py, pw, ph]);
-                                self.new_region_name = format!("region{}", self.regions.len() + 1);
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    self.pending_region = Some([px, py, pw, ph]);
+                                    self.new_region_name = format!("region{}", self.regions.len() + 1);
+                                }
                             }
 
                             self.drag_start = None;
@@ -736,8 +760,11 @@ impl eframe::App for TemplateApp {
                                 let pw = (lw * scale_ui_to_px).round().max(1.0) as usize;
                                 let ph = (lh * scale_ui_to_px).round().max(1.0) as usize;
 
-                                self.pending_region = Some([px, py, pw, ph]);
-                                self.new_region_name = format!("region{}", self.regions.len() + 1);
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    self.pending_region = Some([px, py, pw, ph]);
+                                    self.new_region_name = format!("region{}", self.regions.len() + 1);
+                                }
                             }
 
                             self.drag_start = None;
