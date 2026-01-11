@@ -3808,10 +3808,13 @@ dependencies = [
  "egui",
  "env_logger",
  "image 0.24.9",
+ "js-sys",
  "log",
+ "once_cell",
  "rfd",
  "serde",
  "serde_json",
+ "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
 ]

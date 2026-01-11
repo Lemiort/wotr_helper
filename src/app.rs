@@ -177,6 +177,20 @@ impl TemplateApp {
         Ok(())
     }
 
+    /// Load atlas image from raw bytes (used by the web file picker)
+    fn load_atlas_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?.to_rgba8();
+        let (w, h) = img.dimensions();
+        self.atlas = Some(img);
+        self.atlas_size = [w as usize, h as usize];
+        // no real path when loading from a blob; set a friendly label
+        self.atlas_path = Some("(selected)".to_owned());
+        // Invalidate texture so it will be recreated
+        self.texture = None;
+        self.last_index = None;
+        Ok(())
+    }
+
     fn cols(&self) -> usize {
         if self.atlas_size[0] == 0 { return 0; }
         self.atlas_size[0] / self.card_width
@@ -396,11 +410,18 @@ impl eframe::App for TemplateApp {
                 ui.label(self.atlas_path.as_deref().unwrap_or("(none)"));
                 if ui.button("Open...").clicked() {
                     #[cfg(not(target_arch = "wasm32"))]
-                    if let Some(path) = FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg"]).pick_file() {
-                        match self.load_atlas(&path) {
-                            Ok(()) => self.error = None,
-                            Err(e) => self.error = Some(e),
+                    {
+                        if let Some(path) = FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg"]).pick_file() {
+                            match self.load_atlas(&path) {
+                                Ok(()) => self.error = None,
+                                Err(e) => self.error = Some(e),
+                            }
                         }
+                    }
+
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        crate::file_picker::open_image_picker();
                     }
                 }
                 if ui.button("Reload").clicked() {
@@ -498,7 +519,7 @@ impl eframe::App for TemplateApp {
                         let ch = self.card_height as f32;
                         // Reserve some space so UI controls remain visible. Allow scaling up to 4x.
                         let max_w = (avail.x - 20.0).max(10.0);
-                        let max_h = (avail.y - 20.0).max(10.0);
+                        let max_h = ((avail.y * 1.0) - 20.0).max(10.0);
                         let scale_x = max_w / cw;
                         let scale_y = max_h / ch;
                         let mut scale = scale_x.min(scale_y);
@@ -510,24 +531,28 @@ impl eframe::App for TemplateApp {
                         let resp = ui.add(img_widget.sense(egui::Sense::click_and_drag()));
                         let img_rect = resp.rect;
 
-                        // Response state debug: shows whether `resp` reports hover/click/drag events
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(format!("hovered: {}", resp.hovered()));
-                            ui.separator();
-                            ui.label(format!("contains_pointer: {}", resp.contains_pointer()));
-                            ui.separator();
-                            ui.label(format!("pointer_down_on: {}", resp.is_pointer_button_down_on()));
-                            ui.separator();
-                            ui.label(format!("interact_pos: {:?}", resp.interact_pointer_pos()));
-                            ui.separator();
-                            ui.label(format!("drag_started: {}", resp.drag_started_by(egui::PointerButton::Primary)));
-                            ui.separator();
-                            ui.label(format!("dragged: {}", resp.dragged_by(egui::PointerButton::Primary)));
-                            ui.separator();
-                            ui.label(format!("drag_stopped: {}", resp.drag_stopped_by(egui::PointerButton::Primary)));
-                            ui.separator();
-                            ui.label(format!("clicked: {}", resp.clicked_by(egui::PointerButton::Primary)));
-                        });
+                        // Minimal debug: show hovered+clicked. Disabled on wasm builds.
+                        if self.show_regions_panel {
+                            egui::TopBottomPanel::bottom("debug_panel").show(ctx, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(format!("hovered: {}", resp.hovered()));
+                                    ui.separator();
+                                    ui.label(format!("contains_pointer: {}", resp.contains_pointer()));
+                                    ui.separator();
+                                    ui.label(format!("pointer_down_on: {}", resp.is_pointer_button_down_on()));
+                                    ui.separator();
+                                    ui.label(format!("interact_pos: {:?}", resp.interact_pointer_pos()));
+                                    ui.separator();
+                                    ui.label(format!("drag_started: {}", resp.drag_started_by(egui::PointerButton::Primary)));
+                                    ui.separator();
+                                    ui.label(format!("dragged: {}", resp.dragged_by(egui::PointerButton::Primary)));
+                                    ui.separator();
+                                    ui.label(format!("drag_stopped: {}", resp.drag_stopped_by(egui::PointerButton::Primary)));
+                                    ui.separator();
+                                    ui.label(format!("clicked: {}", resp.clicked_by(egui::PointerButton::Primary)));
+                                });
+                            });
+                        }
 
                         #[cfg(not(target_arch = "wasm32"))]
                         {
@@ -867,6 +892,20 @@ impl eframe::App for TemplateApp {
                 }
             }
         });
+
+        // On web builds, check if the user picked a file (async callback writes bytes into the picker buffer)
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some((bytes, filename)) = crate::file_picker::take_selected_image_bytes() {
+                match self.load_atlas_bytes(&bytes) {
+                    Ok(()) => {
+                        self.error = None;
+                        self.atlas_path = Some(filename);
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+            }
+        }
     }
 }
 
