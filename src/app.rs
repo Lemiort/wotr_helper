@@ -46,6 +46,13 @@ pub struct TemplateApp {
     // Selected atlas preset index (into ATLAS_PRESETS) or None
     selected_atlas: Option<usize>,
 
+    // Ownership confirmation state: persist whether user confirmed they own a copy of the game
+    #[serde(default)]
+    ownership_confirmed: bool,
+
+    #[serde(skip)]
+    ownership_confirmation_checked: bool,
+
     #[serde(skip)]
     texture: Option<egui::TextureHandle>,
 
@@ -133,6 +140,8 @@ impl Default for TemplateApp {
             atlas: None,
             atlas_size: [0, 0],
             selected_atlas: None,
+            ownership_confirmed: false,
+            ownership_confirmation_checked: false,
             // sensible default card sizes
             card_width: 535,
             card_height: 752,
@@ -182,6 +191,20 @@ impl TemplateApp {
 
         // Set visuals to dark by default
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
+
+        // On wasm, read ownership confirmation from localStorage if present
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window() {
+                if let Ok(Some(ls)) = window.local_storage() {
+                    if let Ok(Some(val)) = ls.get_item("wotr_helper:ownership_confirmed") {
+                        if val == "1" {
+                            this.ownership_confirmed = true;
+                        }
+                    }
+                }
+            }
+        }
 
         this
     }
@@ -278,6 +301,49 @@ impl eframe::App for TemplateApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
         // For inspiration and more examples, go to https://emilk.github.io/egui
+
+        // If ownership not confirmed, show a blocking modal and return early (prevents any interactions)
+        if !self.ownership_confirmed {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::TopDown), |ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                    ui.group(|ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.heading("Ownership confirmation");
+                            ui.add_space(6.0);
+                            ui.label("Please confirm that you own a copy of the War of the Rind card game to continue.");
+                            ui.add_space(8.0);
+                            ui.checkbox(&mut self.ownership_confirmation_checked, "I confirm I own a copy of the War of the Rind card game");
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                if ui.add_enabled(self.ownership_confirmation_checked, egui::Button::new("Continue")).clicked() {
+                                    self.ownership_confirmed = true;
+                                    #[cfg(target_arch = "wasm32")]
+                                    {
+                                        if let Some(window) = web_sys::window() {
+                                            if let Ok(Some(ls)) = window.local_storage() {
+                                                let _ = ls.set_item("wotr_helper:ownership_confirmed", "1");
+                                            }
+                                        }
+                                    }
+                                }
+                                if ui.button("Quit").clicked() {
+                                    #[cfg(not(target_arch = "wasm32"))]
+                                    {
+                                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                    }
+                                    #[cfg(target_arch = "wasm32")]
+                                    {
+                                        if let Some(w) = web_sys::window() { let _ = w.close(); }
+                                    }
+                                }
+                            });
+                        });
+                    });
+                });
+            });
+            return;
+        }
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             // The top panel is often a good place for a menu bar:
