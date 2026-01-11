@@ -78,6 +78,43 @@ We use [Trunk](https://trunkrs.dev/) to build for web target.
 
 You can test the template app at <https://emilk.github.io/eframe_template/>.
 
+### Android 📱
+
+Quick steps to build and run on Android using `x` (from `xbuild`):
+
+**Prerequisites**
+- Have `adb` available in `PATH` and enable USB debugging on your device.
+- Install `xbuild` (provides `x`):
+
+```sh
+cargo install --locked xbuild
+# or: cargo install --locked x
+```
+
+- Check environment and tools:
+
+```sh
+x doctor
+```
+
+
+**Build & run**
+- Build for Android (arm64 example):
+
+```sh
+x devices
+x build --arch arm64 --platform android
+```
+
+- Install & run on a connected device (replace the device id as needed):
+
+```sh
+x run --device adb:<your-device-id>
+```
+
+**Troubleshooting & tips**
+- If `x doctor` reports missing tools, install the needed NDK components (usually `lld`, `llvm-readobj`, etc.).
+
 ## Updating egui
 
 As of 2023, egui is in active development with frequent releases with breaking changes. [eframe_template](https://github.com/emilk/eframe_template/) will be updated in lock-step to always use the latest version of egui.

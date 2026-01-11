@@ -1,7 +1,7 @@
 use egui::{ColorImage, TextureOptions};
 use std::path::Path;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
 use rfd::FileDialog;
 
 // A named rectangular region on a card (x,y,width,height in card pixel coords)
@@ -428,49 +428,65 @@ impl eframe::App for TemplateApp {
                         self.selected_region = None;
                     }
                     if ui.button("Save...").clicked() {
-                        if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).save_file() {
-                            // New format: include the card/image size alongside regions
-                            #[derive(serde::Serialize)]
-                            struct RegionsFile<'a> {
-                                image_size: [usize; 2],
-                                regions: &'a [Region],
+                        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+                        {
+                            if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).save_file() {
+                                // New format: include the card/image size alongside regions
+                                #[derive(serde::Serialize)]
+                                struct RegionsFile<'a> {
+                                    image_size: [usize; 2],
+                                    regions: &'a [Region],
+                                }
+                                let file = RegionsFile { image_size: [self.card_width, self.card_height], regions: &self.regions };
+                                if let Ok(s) = serde_json::to_string_pretty(&file) {
+                                    let _ = std::fs::write(path, s);
+                                }
                             }
-                            let file = RegionsFile { image_size: [self.card_width, self.card_height], regions: &self.regions };
-                            if let Ok(s) = serde_json::to_string_pretty(&file) {
-                                let _ = std::fs::write(path, s);
-                            }
+                        }
+
+                        #[cfg(target_os = "android")]
+                        {
+                            self.error = Some("File dialogs are not supported on Android".to_owned());
                         }
                     }
                     if ui.button("Load...").clicked() {
-                        if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
-                            match std::fs::read_to_string(&path) {
-                                Ok(s) => {
-                                    // Try new format first (object with image_size + regions), otherwise fall back to old Vec<Region>
-                                    #[derive(serde::Deserialize)]
-                                    struct RegionsFile {
-                                        image_size: [usize; 2],
-                                        regions: Vec<Region>,
-                                    }
+                        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
+                        {
+                            if let Some(path) = FileDialog::new().add_filter("JSON", &["json"]).pick_file() {
+                                match std::fs::read_to_string(&path) {
+                                    Ok(s) => {
+                                        // Try new format first (object with image_size + regions), otherwise fall back to old Vec<Region>
+                                        #[derive(serde::Deserialize)]
+                                        struct RegionsFile {
+                                            image_size: [usize; 2],
+                                            regions: Vec<Region>,
+                                        }
 
-                                    if let Ok(f) = serde_json::from_str::<RegionsFile>(&s) {
-                                        self.regions = f.regions;
-                                        self.selected_region = None;
-                                        // Update card size to match saved file
-                                        self.card_width = f.image_size[0].max(1);
-                                        self.card_height = f.image_size[1].max(1);
-                                        self.selected_preset = None;
-                                        self.texture = None; // invalidate preview so it will be recreated
-                                        self.last_index = None;
-                                    } else if let Ok(v) = serde_json::from_str::<Vec<Region>>(&s) {
-                                        // Old format
-                                        self.regions = v;
-                                        self.selected_region = None;
-                                    } else {
-                                        self.error = Some("Failed to parse regions file: unknown format".to_owned());
+                                        if let Ok(f) = serde_json::from_str::<RegionsFile>(&s) {
+                                            self.regions = f.regions;
+                                            self.selected_region = None;
+                                            // Update card size to match saved file
+                                            self.card_width = f.image_size[0].max(1);
+                                            self.card_height = f.image_size[1].max(1);
+                                            self.selected_preset = None;
+                                            self.texture = None; // invalidate preview so it will be recreated
+                                            self.last_index = None;
+                                        } else if let Ok(v) = serde_json::from_str::<Vec<Region>>(&s) {
+                                            // Old format
+                                            self.regions = v;
+                                            self.selected_region = None;
+                                        } else {
+                                            self.error = Some("Failed to parse regions file: unknown format".to_owned());
+                                        }
                                     }
+                                    Err(e) => { self.error = Some(format!("Failed to read regions file: {}", e)); },
                                 }
-                                Err(e) => { self.error = Some(format!("Failed to read regions file: {}", e)); },
                             }
+                        }
+
+                        #[cfg(target_os = "android")]
+                        {
+                            self.error = Some("File dialogs are not supported on Android".to_owned());
                         }
                     }
                 });
@@ -530,7 +546,7 @@ impl eframe::App for TemplateApp {
                     });
                 });
                 if ui.button("Open...").clicked() {
-                    #[cfg(not(target_arch = "wasm32"))]
+                    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "android")))]
                     {
                         if let Some(path) = FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg"]).pick_file() {
                             match self.load_atlas(&path) {
@@ -538,6 +554,11 @@ impl eframe::App for TemplateApp {
                                 Err(e) => self.error = Some(e),
                             }
                         }
+                    }
+
+                    #[cfg(target_os = "android")]
+                    {
+                        self.error = Some("File dialogs are not supported on Android".to_owned());
                     }
 
                     #[cfg(target_arch = "wasm32")]
