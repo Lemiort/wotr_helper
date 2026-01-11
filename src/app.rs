@@ -43,6 +43,9 @@ pub struct TemplateApp {
     // Selected preset index into CARD_FORMATS or None for custom
     selected_preset: Option<usize>,
 
+    // Selected atlas preset index (into ATLAS_PRESETS) or None
+    selected_atlas: Option<usize>,
+
     #[serde(skip)]
     texture: Option<egui::TextureHandle>,
 
@@ -101,6 +104,23 @@ const CARD_FORMATS: &[(&str, usize, usize)] = &[
     ("Path (1380x912)", 1380, 912),
 ];
 
+// Bundled atlas presets for quick selection (label, asset path, card width, card height)
+const ATLAS_PRESETS: &[(&str, &str, usize, usize)] = &[
+    ("Light cards", "assets/light_cards.png", 535, 752),
+    ("Dark cards", "assets/dark_cards.png", 535, 752),
+    ("Light fortresses", "assets/light_fortresses.png", 1380, 912),
+    ("Dark fortresses", "assets/dark_fortresses.png", 1380, 912),
+    ("Paths 1", "assets/paths1.png", 1380, 912),
+    ("Paths 2", "assets/paths2.png", 1380, 912),
+    ("Paths 3", "assets/paths3.png", 1380, 912),
+    ("Paths 4", "assets/paths4.png", 1380, 912),
+    ("Paths 5", "assets/paths5.png", 1380, 912),
+    ("Paths 6", "assets/paths6.png", 1380, 912),
+    ("Paths 7", "assets/paths7.png", 1380, 912),
+    ("Paths 8", "assets/paths8.png", 1380, 912),
+    ("Paths 9", "assets/paths9.png", 1380, 912),
+];
+
 impl Default for TemplateApp {
     fn default() -> Self {
         Self {
@@ -112,6 +132,7 @@ impl Default for TemplateApp {
             atlas_path: Some(ATLAS_PATH.to_string()),
             atlas: None,
             atlas_size: [0, 0],
+            selected_atlas: None,
             // sensible default card sizes
             card_width: 535,
             card_height: 752,
@@ -407,7 +428,41 @@ impl eframe::App for TemplateApp {
             // Path / Open / Reload
             ui.horizontal(|ui| {
                 ui.label("Atlas:");
-                ui.label(self.atlas_path.as_deref().unwrap_or("(none)"));
+                ui.horizontal(|ui| {
+                    ui.label(self.atlas_path.as_deref().unwrap_or("(none)"));
+                    ui.add_space(12.0);
+                    // Atlas presets combo box
+                    egui::ComboBox::from_id_salt("atlas_presets").selected_text(
+                        self.selected_atlas.and_then(|i| ATLAS_PRESETS.get(i).map(|(n,_,_,_)| *n)).unwrap_or("Select preset")
+                    ).show_ui(ui, |ui| {
+                        for (i, (name, path, w, h)) in ATLAS_PRESETS.iter().enumerate() {
+                            if ui.selectable_label(self.selected_atlas == Some(i), *name).clicked() {
+                                self.selected_atlas = Some(i);
+                                // Update card sizes to match preset
+                                self.card_width = *w;
+                                self.card_height = *h;
+                                self.selected_preset = None;
+                                self.texture = None;
+                                self.last_index = None;
+
+                                // Load the asset: on native we can read directly, on wasm it will request fetch
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    if let Err(e) = self.load_atlas(Path::new(path)) {
+                                        self.error = Some(e);
+                                    } else {
+                                        self.error = None;
+                                    }
+                                }
+
+                                #[cfg(target_arch = "wasm32")]
+                                {
+                                    crate::file_picker::request_asset(path);
+                                }
+                            }
+                        }
+                    });
+                });
                 if ui.button("Open...").clicked() {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
@@ -554,7 +609,8 @@ impl eframe::App for TemplateApp {
                             });
                         }
 
-                        #[cfg(not(target_arch = "wasm32"))]
+                        // Handle mouse input for region selection/creation
+                        if self.show_regions_panel
                         {
                             // Additional fallback: process raw pointer events to detect presses/drags/releases when Response misses them
                             const DRAG_THRESHOLD: f32 = 4.0;
@@ -833,57 +889,58 @@ impl eframe::App for TemplateApp {
                         }
 
                         // Paint overlays (existing regions and drag preview)
-                        let painter = ui.painter();
-                        // Draw existing regions
-                        for (i, r) in self.regions.iter().enumerate() {
-                            let x = img_rect.min.x + (r.x as f32) * scale;
-                            let y = img_rect.min.y + (r.y as f32) * scale;
-                            let w = (r.width as f32) * scale;
-                            let h = (r.height as f32) * scale;
-                            let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
-                            let color = if self.selected_region == Some(i) { egui::Color32::LIGHT_BLUE } else { egui::Color32::from_rgba_unmultiplied(200, 100, 100, 180) };
-                            let stroke = egui::Stroke::new(2.0, color);
-                            painter.line_segment([rect.left_top(), rect.right_top()], stroke);
-                            painter.line_segment([rect.right_top(), rect.right_bottom()], stroke);
-                            painter.line_segment([rect.right_bottom(), rect.left_bottom()], stroke);
-                            painter.line_segment([rect.left_bottom(), rect.left_top()], stroke);
-                            if self.selected_region == Some(i) {
-                                painter.rect_filled(rect.expand(2.0), 2.0, egui::Color32::from_rgba_unmultiplied(40, 100, 160, 48));
+                        if self.show_regions_panel {
+                            let painter = ui.painter();
+                            // Draw existing regions
+                            for (i, r) in self.regions.iter().enumerate() {
+                                let x = img_rect.min.x + (r.x as f32) * scale;
+                                let y = img_rect.min.y + (r.y as f32) * scale;
+                                let w = (r.width as f32) * scale;
+                                let h = (r.height as f32) * scale;
+                                let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+                                let color = if self.selected_region == Some(i) { egui::Color32::LIGHT_BLUE } else { egui::Color32::from_rgba_unmultiplied(200, 100, 100, 180) };
+                                let stroke = egui::Stroke::new(2.0, color);
+                                painter.line_segment([rect.left_top(), rect.right_top()], stroke);
+                                painter.line_segment([rect.right_top(), rect.right_bottom()], stroke);
+                                painter.line_segment([rect.right_bottom(), rect.left_bottom()], stroke);
+                                painter.line_segment([rect.left_bottom(), rect.left_top()], stroke);
+                                if self.selected_region == Some(i) {
+                                    painter.rect_filled(rect.expand(2.0), 2.0, egui::Color32::from_rgba_unmultiplied(40, 100, 160, 48));
+                                }
+                            }
+
+                            // Draw drag preview if dragging
+                            if let (Some(start), Some(cur)) = (self.drag_start, self.drag_current) {
+                                let local_start = start - img_rect.min;
+                                let local_cur = cur - img_rect.min;
+                                let lx = local_start.x.min(local_cur.x).clamp(0.0, img_rect.width());
+                                let ly = local_start.y.min(local_cur.y).clamp(0.0, img_rect.height());
+                                let lw = (local_start.x - local_cur.x).abs().clamp(1.0, img_rect.width());
+                                let lh = (local_start.y - local_cur.y).abs().clamp(1.0, img_rect.height());
+                                let rect = egui::Rect::from_min_size(img_rect.min + egui::vec2(lx, ly), egui::vec2(lw, lh));
+                                let stroke = egui::Stroke::new(2.0, egui::Color32::YELLOW);
+                                painter.line_segment([rect.left_top(), rect.right_top()], stroke);
+                                painter.line_segment([rect.right_top(), rect.right_bottom()], stroke);
+                                painter.line_segment([rect.right_bottom(), rect.left_bottom()], stroke);
+                                painter.line_segment([rect.left_bottom(), rect.left_top()], stroke);
+                            }
+
+                            // Draw pending region (after release, before naming)
+                            if let Some([px, py, pw, ph]) = self.pending_region {
+                                let x = img_rect.min.x + (px as f32) * scale;
+                                let y = img_rect.min.y + (py as f32) * scale;
+                                let w = (pw as f32) * scale;
+                                let h = (ph as f32) * scale;
+                                let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+                                let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgba_unmultiplied(255, 200, 0, 200));
+                                painter.line_segment([rect.left_top(), rect.right_top()], stroke);
+                                painter.line_segment([rect.right_top(), rect.right_bottom()], stroke);
+                                painter.line_segment([rect.right_bottom(), rect.left_bottom()], stroke);
+                                painter.line_segment([rect.left_bottom(), rect.left_top()], stroke);
+                                painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(255, 200, 0, 40));
                             }
                         }
 
-                        // Draw drag preview if dragging
-                        if let (Some(start), Some(cur)) = (self.drag_start, self.drag_current) {
-                            let local_start = start - img_rect.min;
-                            let local_cur = cur - img_rect.min;
-                            let lx = local_start.x.min(local_cur.x).clamp(0.0, img_rect.width());
-                            let ly = local_start.y.min(local_cur.y).clamp(0.0, img_rect.height());
-                            let lw = (local_start.x - local_cur.x).abs().clamp(1.0, img_rect.width());
-                            let lh = (local_start.y - local_cur.y).abs().clamp(1.0, img_rect.height());
-                            let rect = egui::Rect::from_min_size(img_rect.min + egui::vec2(lx, ly), egui::vec2(lw, lh));
-                            let stroke = egui::Stroke::new(2.0, egui::Color32::YELLOW);
-                            painter.line_segment([rect.left_top(), rect.right_top()], stroke);
-                            painter.line_segment([rect.right_top(), rect.right_bottom()], stroke);
-                            painter.line_segment([rect.right_bottom(), rect.left_bottom()], stroke);
-                            painter.line_segment([rect.left_bottom(), rect.left_top()], stroke);
-                        }
-
-                        // Draw pending region (after release, before naming)
-                        if let Some([px, py, pw, ph]) = self.pending_region {
-                            let x = img_rect.min.x + (px as f32) * scale;
-                            let y = img_rect.min.y + (py as f32) * scale;
-                            let w = (pw as f32) * scale;
-                            let h = (ph as f32) * scale;
-                            let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
-                            let stroke = egui::Stroke::new(2.0, egui::Color32::from_rgba_unmultiplied(255, 200, 0, 200));
-                            painter.line_segment([rect.left_top(), rect.right_top()], stroke);
-                            painter.line_segment([rect.right_top(), rect.right_bottom()], stroke);
-                            painter.line_segment([rect.right_bottom(), rect.left_bottom()], stroke);
-                            painter.line_segment([rect.left_bottom(), rect.left_top()], stroke);
-                            painter.rect_filled(rect, 0.0, egui::Color32::from_rgba_unmultiplied(255, 200, 0, 40));
-                        }
-
-                        // Debug moved to SidePanel (right) for visibility
                     });
 
 
